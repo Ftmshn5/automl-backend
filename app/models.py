@@ -1,43 +1,38 @@
-import enum
-import datetime
-from sqlalchemy import Column, Integer, String, DateTime, Float, ForeignKey, JSON, Enum
+import uuid
+from datetime import datetime
+from sqlalchemy import Column, String, Float, Integer, DateTime, ForeignKey, Text, JSON
 from sqlalchemy.orm import relationship
 from app.database import Base
 
-class JobStatus(str, enum.Enum):
-    PENDING = "PENDING"
-    PROCESSING = "PROCESSING"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
+class TrainingJob(Base):
+    __tablename__ = "training_jobs"
 
-class TaskStatus(str, enum.Enum):
-    PENDING = "PENDING"
-    PROCESSING = "PROCESSING"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-    RETRYING = "RETRYING"
-
-class Job(Base):
-    __tablename__ = "jobs"
-
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     filename = Column(String, nullable=False)
     target_column = Column(String, nullable=False)
-    status = Column(Enum(JobStatus), default=JobStatus.PENDING)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    task_type = Column(String, nullable=False)
+    status = Column(String, default="PENDING")  # PENDING, RUNNING, COMPLETED, FAILED
+    total_tasks = Column(Integer, default=0)
+    completed_tasks = Column(Integer, default=0)
+    failed_tasks = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
 
-    subtasks = relationship("SubTask", back_populates="job", cascade="all, delete-orphan")
+    # Alt görevlerle ilişki
+    sub_tasks = relationship("ModelTaskResult", back_populates="job", cascade="all, delete-orphan")
 
-class SubTask(Base):
-    __tablename__ = "subtasks"
 
-    id = Column(Integer, primary_key=True, index=True)
-    job_id = Column(Integer, ForeignKey("jobs.id"), nullable=False)
-    model_name = Column(String, nullable=False)
-    status = Column(Enum(TaskStatus), default=TaskStatus.PENDING)
-    retry_count = Column(Integer, default=0)
-    metrics = Column(JSON, nullable=True)
+class ModelTaskResult(Base):
+    __tablename__ = "model_task_results"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    job_id = Column(String, ForeignKey("training_jobs.id"), nullable=False)
+    model_name = Column(String, nullable=False)  # Random Forest, XGBoost vb.
+    status = Column(String, default="PENDING")   # PENDING, RUNNING, SUCCESS, FAILURE, RETRYING
+    metrics = Column(JSON, nullable=True)        # {"r2": 0.85, "mse": 0.12}
     execution_time = Column(Float, nullable=True)
-    error_message = Column(String, nullable=True)
+    retry_count = Column(Integer, default=0)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
-    job = relationship("Job", back_populates="subtasks")
+    job = relationship("TrainingJob", back_populates="sub_tasks")

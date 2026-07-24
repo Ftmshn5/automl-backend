@@ -60,3 +60,14 @@ class ReportResponse(BaseModel):
     best_score: float
     total_models_evaluated: int
     all_scores: List[ModelScore]
+
+    # --- Asenkron Görev Şemaları ---
+class AsyncTaskResponse(BaseModel):
+    message: str
+    task_id: str
+    status: str
+
+class TaskStatusResponse(BaseModel):
+    task_id: str
+    status: str
+    result: Optional[dict] = None

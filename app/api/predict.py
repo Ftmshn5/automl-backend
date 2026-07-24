@@ -1,46 +1,41 @@
-from fastapi import APIRouter, HTTPException
-import pandas as pd
 import os
 import joblib
+import pandas as pd
+from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel
+from typing import Dict, Any, List
 
-from app.schemas import PredictRequest, PredictResponse
+router = APIRouter(prefix="", tags=["AutoML Predict"])
 
-router = APIRouter(prefix="/api/v1", tags=["Prediction"])
+SAVED_MODELS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "saved_models"))
 
-MODEL_DIR = "saved_models"
+class PredictRequest(BaseModel):
+    model_filename: str
+    features: List[Dict[str, Any]]  # Örn: [{"feature_1": 12.5, "feature_2": 3.4}]
 
-@router.post("/predict", response_model=PredictResponse)
-async def predict(request: PredictRequest):
-    model_path = os.path.join(MODEL_DIR, request.model_filename)
-    
+@router.post("/predict", status_code=status.HTTP_200_OK)
+def make_prediction(request: PredictRequest):
+    model_path = os.path.join(SAVED_MODELS_DIR, request.model_filename)
+
     if not os.path.exists(model_path):
         raise HTTPException(
-            status_code=404, 
-            detail=f"'{request.model_filename}' adında eğitilmiş bir model bulunamadı."
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail=f"'{request.model_filename}' adında kaydedilmiş bir model bulunamadı."
         )
 
     try:
-        # 1. Modeli yükle
         model = joblib.load(model_path)
-
-        # 2. Gelen veriyi DataFrame'e dönüştür
-        input_df = pd.DataFrame(request.data)
-
-        # 3. Kategorik sütunları One-Hot Encode yap
-        input_df = pd.get_dummies(input_df, drop_first=True)
-
-        # 4. Modelin eğitildiği özelliklerle (features) gelen veriyi hizala
-        if hasattr(model, "feature_names_in_"):
-            feature_names = model.feature_names_in_
-            input_df = input_df.reindex(columns=feature_names, fill_value=0)
-
-        # 5. Tahmin üret
-        predictions = model.predict(input_df)
-
-        return PredictResponse(
-            message="Tahmin başarıyla tamamlandı!",
-            predictions=[float(p) for p in predictions]
-        )
-
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Tahmin sırasında hata oluştu: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Model yüklenirken hata oluştu: {str(e)}")
+
+    try:
+        input_df = pd.DataFrame(request.features)
+        predictions = model.predict(input_df)
+        
+        return {
+            "status": "SUCCESS",
+            "model_used": request.model_filename,
+            "predictions": [round(float(p), 4) for p in predictions]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Tahmin üretilirken hata oluştu: {str(e)}")

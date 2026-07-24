@@ -1,81 +1,33 @@
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
 import os
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
 
-router = APIRouter(prefix="/api/v1", tags=["Reporting"])
+from app.database import get_db
+from app.models import TrainingJob, ModelTaskResult
+from app.services.pdf_generator import generate_pdf_report
 
-MODEL_DIR = "saved_models"
-REPORT_DIR = "reports"
+router = APIRouter(prefix="", tags=["AutoML Reports"])
 
-os.makedirs(REPORT_DIR, exist_ok=True)
+@router.get("/reports/{job_id}/pdf", status_code=status.HTTP_200_OK)
+def download_pdf_report(job_id: str, db: Session = Depends(get_db)):
+    job = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Eğitim işi bulunamadı.")
 
-@router.get("/report/pdf/{model_filename}")
-async def generate_pdf_report(model_filename: str):
-    """
-    Eğitilen model için PDF formatında özet performans raporu üretir ve indirir.
-    """
-    model_path = os.path.join(MODEL_DIR, model_filename)
-    
-    if not os.path.exists(model_path):
-        raise HTTPException(status_code=404, detail="Model bulunamadı.")
+    if job.status != "COMPLETED":
+        raise HTTPException(status_code=400, detail="Eğitim henüz tamamlanmadı. Rapor üretilemiyor.")
 
-    pdf_filename = f"report_{model_filename.replace('.joblib', '')}.pdf"
-    pdf_path = os.path.join(REPORT_DIR, pdf_filename)
+    sub_tasks = db.query(ModelTaskResult).filter(ModelTaskResult.job_id == job_id).all()
 
-    try:
-        doc = SimpleDocTemplate(pdf_path, pagesize=letter)
-        styles = getSampleStyleSheet()
-        story = []
+    # PDF Raporunu oluştur
+    pdf_path = generate_pdf_report(job, sub_tasks)
 
-        # Başlık
-        title_style = ParagraphStyle(
-            'TitleStyle',
-            parent=styles['Heading1'],
-            fontSize=20,
-            textColor=colors.HexColor("#1A365D"),
-            spaceAfter=20
-        )
-        story.append(Paragraph("AutoML Model Performans Raporu", title_style))
-        story.append(Spacer(1, 12))
+    if not os.path.exists(pdf_path):
+        raise HTTPException(status_code=500, detail="PDF raporu oluşturulamadı.")
 
-        # Model Bilgileri
-        body_style = styles['Normal']
-        story.append(Paragraph(f"<b>Model Dosyasi:</b> {model_filename}", body_style))
-        story.append(Spacer(1, 8))
-        story.append(Paragraph("<b>Durum:</b> Egitim ve Tahmin Servisi Aktif", body_style))
-        story.append(Spacer(1, 20))
-
-        # Özet Tablo
-        table_data = [
-            ["Parametre", "Detay"],
-            ["Rapor Tipi", "AutoML Model Ozet Raporu"],
-            ["Kaydedilen Model", model_filename],
-            ["Sistem Durumu", "Aktif / Canliya Hazir"]
-        ]
-
-        t = Table(table_data, colWidths=[180, 270])
-        t.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#2B6CB0")),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
-            ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor("#EDF2F7")),
-            ('GRID', (0, 0), (-1, -1), 1, colors.HexColor("#CBD5E0")),
-        ]))
-        
-        story.append(t)
-        doc.build(story)
-
-        return FileResponse(
-            path=pdf_path, 
-            filename=pdf_filename, 
-            media_type='application/pdf'
-        )
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF rapor oluşturulurken hata oluştu: {str(e)}")
+    return FileResponse(
+        path=pdf_path,
+        filename=f"AutoML_Report_{job_id}.pdf",
+        media_type="application/pdf"
+    )
