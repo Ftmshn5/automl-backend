@@ -1,41 +1,45 @@
 import os
 import joblib
 import pandas as pd
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Dict, Any, List
 
-router = APIRouter(prefix="", tags=["AutoML Predict"])
+router = APIRouter()
 
-SAVED_MODELS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "saved_models"))
+SAVE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "saved_models"))
 
 class PredictRequest(BaseModel):
-    model_filename: str
-    features: List[Dict[str, Any]]  # Örn: [{"feature_1": 12.5, "feature_2": 3.4}]
+    job_id: str
+    model_name: str
+    data: dict
 
-@router.post("/predict", status_code=status.HTTP_200_OK)
-def make_prediction(request: PredictRequest):
-    model_path = os.path.join(SAVED_MODELS_DIR, request.model_filename)
+@router.post("/predict")
+def predict(request: PredictRequest):
+    # Kaydedilmiş model dosyasını bul
+    model_filename = f"{request.job_id}_{request.model_name}.joblib"
+    model_path = os.path.join(SAVE_DIR, model_filename)
 
     if not os.path.exists(model_path):
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, 
-            detail=f"'{request.model_filename}' adında kaydedilmiş bir model bulunamadı."
+            status_code=404, 
+            detail=f"Kaydedilmiş model dosyası bulunamadı! Yol: {model_path}"
         )
 
     try:
+        # Modeli diskten yükle
         model = joblib.load(model_path)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Model yüklenirken hata oluştu: {str(e)}")
-
-    try:
-        input_df = pd.DataFrame(request.features)
-        predictions = model.predict(input_df)
         
+        # Gelen veriyi DataFrame yapıp One-Hot'a uygula
+        input_df = pd.DataFrame([request.data])
+        input_df = pd.get_dummies(input_df, drop_first=True)
+
+        # Tahmin üret
+        predictions = model.predict(input_df)
         return {
             "status": "SUCCESS",
-            "model_used": request.model_filename,
-            "predictions": [round(float(p), 4) for p in predictions]
+            "job_id": request.job_id,
+            "model_name": request.model_name,
+            "prediction": predictions.tolist()
         }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Tahmin üretilirken hata oluştu: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Tahmin yapılırken hata oluştu: {str(e)}")

@@ -1,32 +1,4 @@
-version: '3.8'
-
 services:
-  # 1. Veritabanı
-  db:
-    image: postgres:15-alpine
-    container_name: automl_db
-    environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=automldb
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  # 2. Redis
-  redis:
-    image: redis:7-alpine
-    container_name: automl_redis
-    ports:
-      - "6379:6379"
-
-  # 3. FastAPI Backend Servisi
   web:
     build: .
     container_name: automl_web
@@ -36,27 +8,42 @@ services:
     volumes:
       - .:/app
     environment:
+      - DATABASE_URL=postgresql://user:password@postgres:5432/automl_db
       - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/automldb
     depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_started
+      - postgres
+      - redis
 
-  # 4. Celery Worker Servisi (Sadece tasks modülünü dinamik yükleyecek komutla)
   celery_worker:
     build: .
     container_name: automl_celery_worker
-    command: celery -A app.celery_app.celery_app worker --loglevel=info -I app.tasks
+    command: celery -A app.celery_app.celery_app worker --loglevel=info
     volumes:
       - .:/app
     environment:
+      - DATABASE_URL=postgresql://user:password@postgres:5432/automl_db
       - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/automldb
     depends_on:
+      - postgres
       - redis
-      - web
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: automl_postgres
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: automl_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: automl_redis
+    ports:
+      - "6379:6379"
 
 volumes:
   postgres_data:

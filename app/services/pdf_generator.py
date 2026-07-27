@@ -1,218 +1,206 @@
 import os
-from datetime import datetime
+import io
+import joblib
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, KeepTogether
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
-# Türkçe Karakter Desteği için DejaVuSans Font Kaydı
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-
-# Linux (Docker) üzerindeki standart DejaVu font yolları
-font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-font_bold_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-
-if os.path.exists(font_path):
-    pdfmetrics.registerFont(TTFont('DejaVu', font_path))
-    pdfmetrics.registerFont(TTFont('DejaVu-Bold', font_bold_path))
-    MAIN_FONT = 'DejaVu'
-    BOLD_FONT = 'DejaVu-Bold'
-else:
-    MAIN_FONT = 'Helvetica'
-    BOLD_FONT = 'Helvetica-Bold'
-
-REPORTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "reports"))
-os.makedirs(REPORTS_DIR, exist_ok=True)
-
-def generate_performance_chart(sub_tasks, task_type, job_id) -> str:
-    chart_path = os.path.join(REPORTS_DIR, f"chart_{job_id}.png")
-    
-    model_names = []
-    scores = []
-    
-    metric_key = "r2" if task_type == "regression" else "f1_score"
-    metric_label = "R² Skoru" if task_type == "regression" else "F1 Skoru"
-
-    for t in sub_tasks:
-        if t.status == "SUCCESS" and t.metrics:
-            model_names.append(t.model_name)
-            scores.append(t.metrics.get(metric_key, 0))
-
-    if not model_names:
-        return None
-
-    plt.figure(figsize=(6, 3))
-    bars = plt.bar(model_names, scores, color=['#1E3A8A', '#3B82F6', '#10B981', '#F59E0B'][:len(model_names)])
-    plt.title(f"Model Performans Karşılaştırması ({metric_label})", fontsize=11, fontweight='bold', pad=10)
-    plt.ylabel(metric_label, fontsize=9)
-    plt.ylim(0, max(scores) * 1.2 if max(scores) > 0 else 1)
-    plt.grid(axis='y', linestyle='--', alpha=0.5)
-
-    for bar in bars:
-        yval = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width()/2.0, yval + 0.02, f"{yval:.4f}", ha='center', va='bottom', fontsize=8)
-
-    plt.tight_layout()
-    plt.savefig(chart_path, dpi=200)
-    plt.close()
-    return chart_path
-
-def generate_pdf_report(job, sub_tasks) -> str:
-    pdf_filename = f"report_{job.id}.pdf"
-    pdf_path = os.path.join(REPORTS_DIR, pdf_filename)
-
+def generate_pdf_report(job, tasks, output_filename="report.pdf"):
+    buffer = io.BytesIO()
     doc = SimpleDocTemplate(
-        pdf_path,
+        buffer,
         pagesize=letter,
-        rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36
+        rightMargin=36,
+        leftMargin=36,
+        topMargin=36,
+        bottomMargin=36
     )
-
+    
+    story = []
     styles = getSampleStyleSheet()
     
+    # Özel Stiller
     title_style = ParagraphStyle(
-        'TitleStyle', parent=styles['Heading1'], 
-        fontName=BOLD_FONT, fontSize=16, 
-        textColor=colors.HexColor('#1E3A8A'), spaceAfter=10
+        'DocTitle',
+        parent=styles['Heading1'],
+        fontSize=20,
+        leading=24,
+        textColor=colors.HexColor('#1E3A8A'),
+        alignment=0,
+        spaceAfter=15
     )
-    subtitle_style = ParagraphStyle(
-        'SubTitleStyle', parent=styles['Heading2'], 
-        fontName=BOLD_FONT, fontSize=11, 
-        textColor=colors.HexColor('#2563EB'), spaceAfter=6
-    )
-    normal_style = ParagraphStyle(
-        'NormalStyle', parent=styles['Normal'], 
-        fontName=MAIN_FONT, fontSize=8.5, leading=12
-    )
-
-    story = []
-
-    # 1. Başlık & Künye
-    story.append(Paragraph("AutoML Paralel Model Eğitim ve Performans Raporu", title_style))
-    story.append(Spacer(1, 5))
     
-    meta_data = [
-        [Paragraph(f"<b>İş ID (Job ID):</b> {job.id}", normal_style), Paragraph(f"<b>Tarih:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", normal_style)],
-        [Paragraph(f"<b>Veri Seti:</b> {job.filename}", normal_style), Paragraph(f"<b>Hedef Değişken (Target):</b> {job.target_column}", normal_style)],
-        [Paragraph(f"<b>Problem Tipi:</b> {job.task_type.upper()}", normal_style), Paragraph(f"<b>İşlem Durumu:</b> Paralel Tamamlandı", normal_style)]
+    subtitle_style = ParagraphStyle(
+        'DocSubtitle',
+        parent=styles['Normal'],
+        fontSize=10,
+        leading=14,
+        textColor=colors.HexColor('#475569'),
+        spaceAfter=15
+    )
+
+    section_heading = ParagraphStyle(
+        'SectionHeading',
+        parent=styles['Heading2'],
+        fontSize=13,
+        leading=16,
+        textColor=colors.HexColor('#0F172A'),
+        spaceBefore=10,
+        spaceAfter=8
+    )
+
+    body_style = ParagraphStyle(
+        'BodyDark',
+        parent=styles['Normal'],
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor('#334155')
+    )
+
+    # 1. BAŞLIK BÖLÜMÜ
+    story.append(Paragraph("AutoML Paralel Model Eğitim ve Performans Raporu", title_style))
+    
+    meta_text = f"""
+    <b>İş Kimliği (Job ID):</b> {job.id}<br/>
+    <b>Veri Seti Dosyası:</b> {job.filename}<br/>
+    <b>Hedef Değişken (Target):</b> {job.target_column}
+    """
+    story.append(Paragraph(meta_text, subtitle_style))
+    story.append(Spacer(1, 5))
+
+    # 2. İSTATİSTİK ÖZET KARTLARI (SUMMARY CARDS)
+    completed_tasks = [t for t in tasks if t.status == 'SUCCESS']
+    best_model = None
+    best_r2 = -float('inf')
+    
+    for t in completed_tasks:
+        if t.metrics and 'r2' in t.metrics:
+            if t.metrics['r2'] > best_r2:
+                best_r2 = t.metrics['r2']
+                best_model = t.model_name
+
+    card_data = [
+        [
+            Paragraph(f"<b>Toplam Model:</b><br/>{len(tasks)}", body_style),
+            Paragraph(f"<b>Başarılı:</b><br/>{len(completed_tasks)}", body_style),
+            Paragraph(f"<b>En İyi Model:</b><br/>{best_model or 'N/A'}", body_style),
+            Paragraph(f"<b>En Yüksek R²:</b><br/>{f'{best_r2:.4f}' if best_model else 'N/A'}", body_style)
+        ]
     ]
-    meta_table = Table(meta_data, colWidths=[270, 270])
-    meta_table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#F8FAFC')),
-        ('TEXTCOLOR', (0,0), (-1,-1), colors.HexColor('#334155')),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E2E8F0')),
+    card_table = Table(card_data, colWidths=[130, 130, 140, 140])
+    card_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#F1F5F9')),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('PADDING', (0,0), (-1,-1), 8),
+        ('BOX', (0,0), (-1,-1), 1, colors.HexColor('#CBD5E1')),
+        ('INNERGRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
     ]))
-    story.append(meta_table)
+    story.append(card_table)
     story.append(Spacer(1, 15))
 
-    # 2. Kazanan Model & Özet
-    successful_tasks = [t for t in sub_tasks if t.status == "SUCCESS" and t.metrics]
-    best_model_name = "Bulunamadı"
-    best_score_str = "N/A"
+    # 3. YAN YANA GRAFİKLER (MODEL KIYASLAMA + FEATURE IMPORTANCE)
+    model_names = [t.model_name for t in completed_tasks]
+    r2_scores = [t.metrics.get('r2', 0) if t.metrics else 0 for t in completed_tasks]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 3.5), dpi=200)
     
-    if successful_tasks:
-        if job.task_type == "regression":
-            best_task = max(successful_tasks, key=lambda x: x.metrics.get("r2", -999))
-            best_score_str = f"R² Skoru = {best_task.metrics.get('r2')}"
+    # Grafik 1: Model Kıyaslama
+    if model_names:
+        bars = ax1.bar(model_names, r2_scores, color='#2563EB', width=0.5)
+        ax1.set_title("Model Performans Kıyaslaması (R²)", fontsize=10, fontweight='bold', pad=10)
+        ax1.set_ylabel("Skor", fontsize=8)
+        ax1.grid(axis='y', linestyle='--', alpha=0.5)
+        ax1.tick_params(axis='both', labelsize=8)
+        for bar in bars:
+            yval = bar.get_height()
+            ax1.text(bar.get_x() + bar.get_width()/2.0, yval, f'{yval:.2f}', ha='center', va='bottom' if yval>=0 else 'top', fontsize=7)
+    else:
+        ax1.text(0.5, 0.5, "Veri Yok", ha='center', va='center')
+
+    # Grafik 2: Öznitelik Önemi (Feature Importance)
+    try:
+        model_path = f"/app/saved_models/{job.id}_{best_model}.joblib" if best_model else None
+        if model_path and os.path.exists(model_path):
+            model_obj = joblib.load(model_path)
+            if hasattr(model_obj, 'feature_importances_'):
+                importances = model_obj.feature_importances_
+                feats = [f"Feature {i+1}" for i in range(len(importances))]
+                top_idx = np.argsort(importances)[-5:]
+                ax2.barh([feats[i] for i in top_idx], importances[top_idx], color='#059669', height=0.5)
+                ax2.set_title(f"En Önemli Değişkenler ({best_model})", fontsize=10, fontweight='bold', pad=10)
+                ax2.tick_params(axis='both', labelsize=8)
+            else:
+                ax2.text(0.5, 0.5, "Öznitelik Önemi Desteklenmiyor", ha='center', va='center', fontsize=8)
         else:
-            best_task = max(successful_tasks, key=lambda x: x.metrics.get("f1_score", 0))
-            best_score_str = f"F1 Skoru = {best_task.metrics.get('f1_score')}"
-        best_model_name = best_task.model_name
+            ax2.text(0.5, 0.5, "Model Dosyası Bulunamadı", ha='center', va='center', fontsize=8)
+    except Exception:
+        ax2.text(0.5, 0.5, "Grafik Üretilemedi", ha='center', va='center', fontsize=8)
 
-    story.append(Paragraph("🏆 Eğitim Özeti ve En Başarılı Model", subtitle_style))
-    summary_text = (
-        f"Veri seti üzerinde <b>{job.total_tasks} farklı algoritma</b> eş zamanlı (paralel) olarak eğitilmiştir. "
-        f"Eğitim sonucunda en yüksek performansı gösteren algoritma: <b>{best_model_name}</b> ({best_score_str}).<br/>"
-        f"<b>Başarılı Görevler:</b> {job.completed_tasks} | <b>Başarısız/Hatalı:</b> {job.failed_tasks}"
-    )
-    story.append(Paragraph(summary_text, normal_style))
-    story.append(Spacer(1, 12))
-
-    # 3. Model Karşılaştırma Tablosu
-    story.append(Paragraph("📊 Detaylı Model Karşılaştırma Tablosu", subtitle_style))
+    plt.tight_layout()
+    img_buf = io.BytesIO()
+    plt.savefig(img_buf, format='png', bbox_inches='tight')
+    plt.close()
+    img_buf.seek(0)
     
-    table_data = [[
-        Paragraph(f"<b>Model Adı</b>", ParagraphStyle('TH1', parent=normal_style, fontName=BOLD_FONT, textColor=colors.whitesmoke)),
-        Paragraph(f"<b>Durum</b>", ParagraphStyle('TH2', parent=normal_style, fontName=BOLD_FONT, textColor=colors.whitesmoke)),
-        Paragraph(f"<b>Hesaplanan Metrikler</b>", ParagraphStyle('TH3', parent=normal_style, fontName=BOLD_FONT, textColor=colors.whitesmoke)),
-        Paragraph(f"<b>Süre (sn)</b>", ParagraphStyle('TH4', parent=normal_style, fontName=BOLD_FONT, textColor=colors.whitesmoke)),
-        Paragraph(f"<b>Yeniden Deneme</b>", ParagraphStyle('TH5', parent=normal_style, fontName=BOLD_FONT, textColor=colors.whitesmoke))
-    ]]
+    story.append(Image(img_buf, width=7.2*inch, height=2.5*inch))
+    story.append(Spacer(1, 15))
 
-    for task in sub_tasks:
-        metrics_str = ", ".join([f"{k.upper()}: {v}" for k, v in task.metrics.items()]) if task.metrics else "N/A"
-        time_str = f"{task.execution_time:.2f} s" if task.execution_time else "N/A"
-        
+    # 4. ŞIK TABLO (TABULAR DATA)
+    story.append(Paragraph("Model Detaylı Sonuçları", section_heading))
+    
+    table_data = [["Model Adı", "Durum", "Hesaplanan Metrikler", "Süre (sn)", "Tekrar"]]
+    for t in tasks:
+        metrics_str = f"MSE: {t.metrics.get('mse', 0):.2f}, R2: {t.metrics.get('r2', 0):.4f}" if t.metrics else "N/A"
         table_data.append([
-            Paragraph(task.model_name, normal_style),
-            Paragraph(task.status, normal_style),
-            Paragraph(metrics_str, normal_style),
-            Paragraph(time_str, normal_style),
-            Paragraph(str(task.retry_count), normal_style)
+            t.model_name,
+            t.status,
+            metrics_str,
+            f"{t.execution_time:.2f} s" if t.execution_time else "-",
+            str(t.retries)
         ])
 
-    t = Table(table_data, colWidths=[110, 70, 210, 80, 70])
-    t.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1E3A8A')),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 5),
-        ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#F8FAFC')),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E1')),
+    table = Table(table_data, colWidths=[110, 70, 220, 80, 60])
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1E3A8A')),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,-1), 8),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F8FAFC')]),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E2E8F0')),
+        ('PADDING', (0,0), (-1,-1), 6),
     ]))
-    story.append(t)
+    story.append(table)
     story.append(Spacer(1, 15))
 
-    # 4. Performans Grafiği Gömme
-    chart_file = generate_performance_chart(sub_tasks, job.task_type, job.id)
-    if chart_file and os.path.exists(chart_file):
-        story.append(Paragraph("📈 Performans Görselleştirmesi", subtitle_style))
-        story.append(Image(chart_file, width=400, height=200))
-        story.append(Spacer(1, 10))
+    # 5. CANLI TAHMİN KUTUSU & DEĞERLENDİRME
+    story.append(Paragraph("Otomatik Sistem Değerlendirmesi ve Tahmin Servisi", section_heading))
+    eval_text = f"""
+    Eğitilen <b>{len(tasks)}</b> adet model arasından en yüksek başarı oranını (R²: <b>{best_r2:.4f}</b>) gösteren 
+    <b>{best_model}</b> modeli seçilmiştir.<br/><br/>
+    <b>Canlı Tahmin Durumu:</b> Seçilen model <code>saved_models/{job.id}_{best_model}.joblib</code> yoluna başarıyla 
+    serileştirilmiştir. API üzerinden <code>/predict</code> uç noktası kullanılarak anlık tahminler üretilebilir.
+    """
+    
+    eval_table = Table([[Paragraph(eval_text, body_style)]], colWidths=[540])
+    eval_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#EFF6FF')),
+        ('BOX', (0,0), (-1,-1), 1, colors.HexColor('#BFDBFE')),
+        ('PADDING', (0,0), (-1,-1), 10),
+    ]))
+    story.append(eval_table)
 
-    # 5. Otomatik Değerlendirme & Yorum
-    story.append(Paragraph("💡 Otomatik Sistem Değerlendirmesi", subtitle_style))
-    comment = (
-        f"Eğitilen modeller arasında <b>{best_model_name}</b>, veri setinin yapısına ve hedef değişkene en iyi uyumu sağlamıştır. "
-        f"Regresyon problemlerinde R² değerinin 1.0'a yaklaşması modelin açıklayıcılık gücünün yüksek olduğunu gösterir. "
-        f"Üretilen bu model 'saved_models/' dizinine kaydedilmiş olup, canlı tahminler için kullanıma hazırdır."
-    )
-    story.append(Paragraph(comment, normal_style))
-
+    # Dokümanı Derle
     doc.build(story)
-
-    if chart_file and os.path.exists(chart_file):
-        try:
-            os.remove(chart_file)
-        except:
-            pass
-
-    return pdf_path
-
-import os
-from datetime import datetime
-import matplotlib.pyplot as plt
-
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
-
-# Türkçe Karakter Desteği (DejaVu Font Kaydı)
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-
-font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-font_bold_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-
-if os.path.exists(font_path):
-    pdfmetrics.registerFont(TTFont('DejaVu', font_path))
-    pdfmetrics.registerFont(TTFont('DejaVu-Bold', font_bold_path))
-    MAIN_FONT = 'DejaVu'
-    BOLD_FONT = 'DejaVu-Bold'
-else:
-    MAIN_FONT = 'Helvetica'
-    BOLD_FONT = 'Helvetica-Bold'
+    buffer.seek(0)
+    return buffer.getvalue()

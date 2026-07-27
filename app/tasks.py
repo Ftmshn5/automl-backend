@@ -1,27 +1,28 @@
 import os
 import time
+import joblib
 import pandas as pd
 from celery import shared_task
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.models import TrainingJob, ModelTaskResult
-from app.services.model_trainer import train_single_model  # Tekli model eğitici
+from app.services.model_trainer import train_single_model
 
-DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
+SAVE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "saved_models"))
+os.makedirs(SAVE_DIR, exist_ok=True)
 
 @shared_task(
     bind=True,
     name="app.tasks.run_single_model_training",
-    autoretry_for=(Exception,),       # Herhangi bir hatada tekrar dene
-    retry_kwargs={'max_retries': 3},  # En fazla 3 kez dene
-    retry_backoff=True                # Exponential backoff (bekleme süresini katlayarak artır)
+    autoretry_for=(Exception,),
+    retry_kwargs={'max_retries': 3},
+    retry_backoff=True
 )
-def run_single_model_training(self, task_result_id: str, filename: str, target_column: str, model_name: str, task_type: str):
+def run_single_model_training(self, task_result_id: str, file_path: str, target_column: str, model_name: str, task_type: str):
     db: Session = SessionLocal()
     start_time = time.time()
     
-    # Veritabanından ilgili alt görevi çek ve durumunu RUNNING yap
     task_record = db.query(ModelTaskResult).filter(ModelTaskResult.id == task_result_id).first()
     if task_record:
         task_record.status = "RUNNING"
@@ -29,13 +30,27 @@ def run_single_model_training(self, task_result_id: str, filename: str, target_c
         db.commit()
 
     try:
-        file_path = os.path.join(DATA_DIR, filename)
+        if not os.path.exists(file_path):
+            if not os.path.isabs(file_path) and not file_path.startswith("uploads/"):
+                file_path = os.path.join("/app/uploads", os.path.basename(file_path))
+            elif file_path.startswith("uploads/"):
+                file_path = os.path.join("/app", file_path)
+
         df = pd.read_csv(file_path)
 
-        # Seçilen modeli eğit
-        metrics = train_single_model(df, target_column, model_name, task_type)
+        # Modeli Eğit
+        metrics, trained_model = train_single_model(df, target_column, model_name, task_type)
         
         elapsed_time = round(time.time() - start_time, 2)
+
+        # Modeli Diske Kaydet
+        if trained_model is not None and task_record:
+            job_id_str = str(task_record.job_id)
+            model_filename = f"{job_id_str}_{model_name}.joblib"
+            model_save_path = os.path.join(SAVE_DIR, model_filename)
+            
+            joblib.dump(trained_model, model_save_path)
+            print(f"✅ MODEL DİSKE KAYDEDİLDİ: {model_save_path}")
 
         # Başarılı sonucu veritabanına kaydet
         if task_record:
@@ -44,7 +59,6 @@ def run_single_model_training(self, task_result_id: str, filename: str, target_c
             task_record.execution_time = elapsed_time
             db.commit()
 
-            # Ana Job'ın ilerleme durumunu güncelle
             job = db.query(TrainingJob).filter(TrainingJob.id == task_record.job_id).first()
             if job:
                 job.completed_tasks += 1
@@ -55,7 +69,7 @@ def run_single_model_training(self, task_result_id: str, filename: str, target_c
         return {"status": "SUCCESS", "model": model_name, "metrics": metrics, "time": elapsed_time}
 
     except Exception as exc:
-        # Hata durumunda veritabanını güncelle
+        db.rollback()  # 🟢 VERİTABANI KİLİTLENMESİNİ ENGELLEMEK İÇİN ROLLBACK
         if task_record:
             task_record.error_message = str(exc)
             if self.request.retries >= self.max_retries:
@@ -64,13 +78,12 @@ def run_single_model_training(self, task_result_id: str, filename: str, target_c
                 if job:
                     job.failed_tasks += 1
                     if job.completed_tasks + job.failed_tasks == job.total_tasks:
-                        job.status = "COMPLETED" # Kısmi başarıyla tamamlama
+                        job.status = "COMPLETED"
                     db.commit()
             else:
                 task_record.status = "RETRYING"
             db.commit()
 
-        db.close()
-        raise exc  # Celery'nin retry yapabilmesi için hatayı fırlatıyoruz
+        raise exc
     finally:
         db.close()
